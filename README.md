@@ -174,3 +174,185 @@ Github紐付けてGithub ActionsやAzure Pipelineを経由してCICDするのが
 [{"USERID":"41467f4d-fdf9-4aaf-b517-8918cff09436","DATE":"2024-04-01","CATEGORY":"Food & Drink","UNIT":485.48,"QUANTITY":1,"AMOUNT":485.48,"PAYMENT":"Other","LOCATION":"群馬県"}]
 ```
 
+## 5. APIをPython/FastAPIからC#/ASP .NET Coreに変更してみた
+Macへのインストール手順は適当に探りつつ、主要なコードのみ掲載。<br>
+まずは大元の実行ファイル。
+```
+[Program.cs]
+using Microsoft.AspNetCore.Builder;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+
+namespace TodoApi
+{
+	public class Program
+	{
+		public static void Main(string[] args)
+		{
+			var builder = WebApplication.CreateBuilder(args);
+			builder.Services.AddControllers();
+			builder.Services.AddEndpointsApiExplorer();
+			builder.Services.AddSwaggerGen();
+
+			var app = builder.Build();
+
+			if (app.Environment.IsDevelopment())
+			{
+				app.UseSwagger();
+				app.UseSwaggerUI();
+			}
+
+			app.UseHttpsRedirection();
+			app.UseAuthorization();
+			app.MapControllers();
+
+			app.Run();
+		}
+	}
+}
+```
+入力値バリデータ
+```
+[Models/UserIdRequest.cs]
+using System.ComponentModel.DataAnnotations;
+
+namespace TodoApi.Models
+{
+    public class UserIdRequest
+    {
+        [Required]
+        [StringLength(50, MinimumLength = 1)]
+        public string UserId { get; set; }
+    }
+}
+```
+DTO
+```
+[Models/TransactionData.cs]
+using System;
+
+namespace TodoApi.Models
+{
+    public class TransactionData
+    {
+        public decimal AMOUNT { get; set; }
+        public string CATEGORY { get; set; }
+        public DateTime DATE { get; set; }
+        public string LOCATION { get; set; }
+        public string PAYMENT { get; set; }
+        public int QUANTITY { get; set; }
+        public decimal UNIT { get; set; }
+        public string USERID { get; set; }
+    }
+}
+```
+コントローラ
+```
+[Controllers/TransactionDataController.cs]
+using Microsoft.AspNetCore.Mvc;
+using System.Collections.Generic;
+using TodoApi.Models;
+using TodoApi.Data;
+
+namespace TodoApi.Controllers
+{
+    [ApiController]
+    [Route("api/[controller]")]
+    public class TransactionDataController : ControllerBase
+    {
+        private readonly IConfiguration _configuration;
+
+        public TransactionDataController(IConfiguration configuration)
+        {
+            _configuration = configuration;
+        }
+
+        [HttpGet]
+        public ActionResult<IEnumerable<TransactionData>> GetByUserId([FromQuery] UserIdRequest request)
+        {
+            if (!ModelState.IsValid)
+                return BadRequest(ModelState);
+
+            var connStr = _configuration.GetConnectionString("SnowflakeConnection");
+            var dao = new TransactionDataDao(connStr);
+            var result = dao.GetByUserId(request.UserId);
+            return Ok(result);
+        }
+    }
+}
+```
+DAO
+```
+[Data/TransactionDataDao.cs]
+using Snowflake.Data.Client;
+using System.Collections.Generic;
+using TodoApi.Models;
+
+namespace TodoApi.Data
+{
+    public class TransactionDataDao
+    {
+        private readonly string _connectionString;
+
+        public TransactionDataDao(string connectionString)
+        {
+            _connectionString = connectionString;
+        }
+
+        public IEnumerable<TransactionData> GetByUserId(string userid)
+        {
+            var result = new List<TransactionData>();
+            using (var conn = new SnowflakeDbConnection())
+            {
+                conn.ConnectionString = _connectionString;
+                conn.Open();
+                using (var cmd = conn.CreateCommand())
+                {
+                    cmd.CommandText = "SELECT AMOUNT, CATEGORY, DATE, LOCATION, PAYMENT, QUANTITY, UNIT, USERID FROM TESTDB.PUBLIC.TRANSACTION_DATA WHERE USERID = :USERID";
+                    var param = cmd.CreateParameter();
+                    param.ParameterName = "USERID";
+                    param.Value = userid;
+                    cmd.Parameters.Add(param);
+                    using (var reader = cmd.ExecuteReader())
+                    {
+                        while (reader.Read())
+                        {
+                            result.Add(new TransactionData
+                            {
+                                AMOUNT = reader.GetDecimal(0),
+                                CATEGORY = reader.GetString(1),
+                                DATE = reader.GetDateTime(2),
+                                LOCATION = reader.GetString(3),
+                                PAYMENT = reader.GetString(4),
+                                QUANTITY = reader.GetInt32(5),
+                                UNIT = reader.GetDecimal(6),
+                                USERID = reader.GetString(7)
+                            });
+                        }
+                    }
+                }
+            }
+            return result;
+        }
+    }
+}
+```
+Snowflakeへの接続設定はこちらに記載<br>
+authenticator=snowflake_jwtをつけないとパスワード要求されて接続できません。<br>
+運用環境では秘密鍵はKeyVaultに保存するのではないでしょうか。
+```
+[appsettings.json]
+{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.AspNetCore": "Warning"
+    }
+  },
+  "AllowedHosts": "*"
+    ,
+    "ConnectionStrings": {
+      "SnowflakeConnection": "account=***;user=***;password=;private_key_file=***;db=TESTDB;schema=PUBLIC;warehouse=COMPUTE_WH;role=MY_APP_ROLE;authenticator=snowflake_jwt"
+    }
+  }
+```
